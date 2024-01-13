@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        Garage Door Opener
+    </head>
+    <body>
+        <form action="/mqttConfigComplete" method="post">
+            <p>
+                Server: <br> <input type="text" name="server" value="[server]"> <br><br>
+                Port: <br> <input type="number" name="port" value="[port]"> <br><br>
+                User: <br> <input type="text" name="username" value="[username]"><br><br>
+                Password: <br> <input type="text" name="password"><br><br>
+            </p>
+            <p>
+                Base Topic:<br> <input type="text" name="baseTopic" value="[baseTopic]"><br><br>
+            </p>
+                <input type="submit" value="Submit">
+            </form>
+    </body>
+</html>

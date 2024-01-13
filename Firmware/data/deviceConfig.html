@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Garage Door Opener - Device Config</title>
+    </head>
+    <body>
+        <form action="/deviceConfigComplete" method="post">
+            <div>
+                <h2>Ping Setup</h2>
+                <label>Bay 1 Warn Distance:</label><br><input type="number" name="ping1WarnDist" value="[ping1WarnDist]" id="Bay1WarnDist">
+                <br><br>
+                <label>Bay 1 Stop Distance:</label><br><input type="number" name="ping1StopDist" value="[ping1StopDist]">
+                <br><br>
+                <label>Bay 2 Warn Distance:</label><br><input type="number" name="ping2WarnDist" value="[ping2WarnDist]">
+                <br><br>
+                <label>Bay 2 Stop Distance:</label><br><input type="number" name="ping2StopDist" value="[ping2StopDist]">
+                <br><br>
+                <label>Ping Speed Milliseconds:</label><br><input type="number" name="pingSpeedMS", value="[pingSpeedMS]">
+            <div>
+            <div>
+                <h2>Environmental Sensor Setup</h2>
+                <label>Sensor Read Time Seconds:</label><br><input type="number" name="dhtReadTimeSeconds", value="[dhtReadTimeSeconds]">
+            </div>
+            <div>
+                <input type="submit" value="Submit">
+            </div>
+        </form>
+        <script>
+            const warnDistance = document.querySelector("Bay1WarnDist");
+            
+        </script>
+    </body>
+</html>
