@@ -1,0 +1,9 @@
+{
+    "mqtt_host": "myhost.mydomain.lan",
+    "mqtt_port": 1883,
+    "mqtt_username": "",
+    "mqtt_password": "",
+    "mqtt_base_topic": "my/base/topic/",
+    "wifi_ssid": "NetworkSSID",
+    "wifi_password": "*******"
+}

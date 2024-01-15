@@ -11,10 +11,6 @@ void MQTTCallback(char *topic, byte *payload, unsigned int length);
 void MQTTReconnect();
 void publishMQTT(const char *topic, const char *message);
 
-void SetupDHT();
-void HandleDHT();
-void ReadDHT();
-
 void setup();
 void loop();
 void SetupPins();
@@ -39,3 +35,5 @@ void HandlePing();
 void HandleMotion();
 void HandleDoorState();
 void ReadDoorState();
+
+void readConfig();

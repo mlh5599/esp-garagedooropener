@@ -1,0 +1,10 @@
+
+#define LED_PIN 2
+#define RELAY_PIN 4
+#define MOTION_PIN 13
+#define PING_1_TRIG_PIN 16
+#define PING_2_TRIG_PIN 3
+#define PING_ECHO_PIN 12
+#define DHT_PIN 1
+#define DOOR_OPEN_SENSOR_PIN 5
+#define DOOR_CLOSED_SENSOR_PIN 14

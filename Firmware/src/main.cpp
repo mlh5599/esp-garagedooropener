@@ -1,16 +1,23 @@
 #include "main.h"
 #include <Arduino.h>
+#include <pinDefinitions.h>
+#include <climate.h>
+#include <ArduinoJson.h>
+// #include <SPIFFS.h>
+
+
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <NewPing.h>
-#include <DHT.h>
+
 #include <PubSubClient.h>
 #include <ESP8266WebServer.h>
 #include <LittleFS.h>
 #include <string.h>
 #include <Ultrasonic.h>
+
 
 //#########################################
 //  WebServer Items
@@ -19,49 +26,23 @@
 bool initialSetupComplete = false;
 ESP8266WebServer server(80);
 
-//##########################################
-//  Pin Defs
-//##########################################
-const int LED_PIN = 2;
-const int RELAY_PIN = 4;
-const int MOTION_PIN = 13;
-const int PING_1_TRIG_PIN = 16;
-const int PING_2_TRIG_PIN = 3;
-const int PING_ECHO_PIN = 12;
-const int DHT_PIN = 1;
-const int DOOR_OPEN_SENSOR_PIN = 5;
-const int DOOR_CLOSED_SENSOR_PIN = 14;
-
-//###########################################
-//  DHT Defs
-//###########################################
-#define DHTTYPE DHT22 // DHT 22  (AM2302), AM2321
-DHT dht(DHT_PIN, DHTTYPE);
-int lastTemp = -99;
-int lastHumidity = -99;
-int lastHeatIndex = -99;
-unsigned long lastSensorCheckMillis = 0;
-bool sendTempUpdate = false;
-bool sendHumidityUpdate = false;
-bool sendHeatIndexUpdate = false;
-unsigned long dhtReadIntervalMillis = 0;
 
 //###########################################
 //  WiFi Defs
 //###########################################
 WiFiClient espClient;
-char *ssid;
-char *password;
+const char* ssid;
+const char* password;
 
 //###########################################
 //  MQTT Defs
 //###########################################
 PubSubClient client(espClient);
 bool isMQTTSetup = false;
-String mqttUser;
-String mqttPassword;
-String mqttServer;
-String mqttBaseTopic;
+const char* mqttUser;
+const char* mqttPassword;
+const char* mqttServer;
+const char* mqttBaseTopic;
 int mqttPort;
 
 //###########################################
@@ -124,6 +105,7 @@ void setup()
 
   SetupPins();
 
+  
   // if(!digitalRead(DOOR_CLOSED_SENSOR_PIN) && !digitalRead(DOOR_OPEN_SENSOR_PIN))
   // {
   //   APModeSetup();
@@ -157,44 +139,44 @@ void APLoop()
 
 void StationModeSetup()
 {
-  LittleFS.begin(); // Start the SPI Flash Files System
+  // LittleFS.begin(); // Start the SPI Flash Files System
 
-  if (LittleFS.exists("/creds.txt"))
-  {
-    initialSetupComplete = true;
-    WiFi.mode(WIFI_STA);
-    WiFi.hostname("GarageDoorOpener");
-    WiFi.setAutoReconnect(true);
-    File file = LittleFS.open("creds.txt", "r");
-    file.readStringUntil(',').toCharArray(ssid, 50);
-    file.readString().toCharArray(password, 100);
-    file.close();
+  // if (LittleFS.exists("/creds.txt"))
+  // {
+  //   initialSetupComplete = true;
+  //   WiFi.mode(WIFI_STA);
+  //   WiFi.hostname("GarageDoorOpener");
+  //   WiFi.setAutoReconnect(true);
+  //   File file = LittleFS.open("creds.txt", "r");
+  //   file.readStringUntil(',').toCharArray(ssid, 50);
+  //   file.readString().toCharArray(password, 100);
+  //   file.close();
 
     WiFi.begin(ssid, password);
-  }
-  else
-  {
-    delay(5000);
-    ESP.restart();
-  }
+  // }
+  // else
+  // {
+  //   delay(5000);
+  //   ESP.restart();
+  // }
 
-  if (LittleFS.exists("/pingConfig.txt"))
-  {
-    File file = LittleFS.open("pingConfig.txt", "r");
-    ping1WarnDist = file.readStringUntil(',').toInt();
-    ping1StopDist = file.readStringUntil(',').toInt();
-    ping2WarnDist = file.readStringUntil(',').toInt();
-    ping2StopDist = file.readStringUntil(',').toInt();
-    pingSpeedMS = file.readStringUntil(',').toInt();
-    file.close();
-  }
+  // if (LittleFS.exists("/pingConfig.txt"))
+  // {
+  //   File file = LittleFS.open("pingConfig.txt", "r");
+  //   ping1WarnDist = file.readStringUntil(',').toInt();
+  //   ping1StopDist = file.readStringUntil(',').toInt();
+  //   ping2WarnDist = file.readStringUntil(',').toInt();
+  //   ping2StopDist = file.readStringUntil(',').toInt();
+  //   pingSpeedMS = file.readStringUntil(',').toInt();
+  //   file.close();
+  // }
 
-  if (LittleFS.exists("/dhtConfig.txt"))
-  {
-    File file = LittleFS.open("dhtConfig.txt", "r");
-    dhtReadIntervalMillis = file.readStringUntil(',').toInt();
-    file.close();
-  }
+  // if (LittleFS.exists("/dhtConfig.txt"))
+  // {
+  //   File file = LittleFS.open("dhtConfig.txt", "r");
+  //   dhtReadIntervalMillis = file.readStringUntil(',').toInt();
+  //   file.close();
+  // }
 
   int i = 0;
   while (WiFi.waitForConnectResult() != WL_CONNECTED)
@@ -252,7 +234,7 @@ void loop()
   //   publishMQTT("door", lastDoorState);
   //   initialDoorStatePublished = true;
   // }
-  HandleDHT();
+  CheckDHT();
   HandlePing();
   HandleMotion();
   HandleDoorState();
@@ -395,21 +377,11 @@ void DoorToggleTimerCallback(void *pArg)
 //################################################
 void SetupMQTT()
 {
-  if (LittleFS.exists("mqttConfig.txt"))
-  {
-
-    File f = LittleFS.open("mqttConfig.txt", "r");
-    mqttServer = f.readStringUntil(',');
-    mqttPort = f.readStringUntil(',').toInt();
-    mqttUser = f.readStringUntil(',');
-    mqttPassword = f.readStringUntil(',');
-    mqttBaseTopic = f.readStringUntil(',');
-
-    client.setServer(mqttServer.c_str(), mqttPort);
+    client.setServer(mqttServer, mqttPort);
 
     client.setCallback(MQTTCallback);
     isMQTTSetup = true;
-  }
+  // }
 }
 
 void MQTTCallback(char *topic, byte *payload, unsigned int length)
@@ -438,24 +410,22 @@ void MQTTReconnect()
 {
   if (isMQTTSetup)
   {
-    // Loop until we're reconnected
+    //Loop until we're reconnected
     if (!client.connected() && WiFi.isConnected())
     {
       // Create a random client ID
       String clientId = WiFi.hostname();
       clientId += String(random(0xffff), HEX);
       // Attempt to connect
-      if (client.connect(clientId.c_str(), mqttBaseTopic.c_str(), 1, true, "OFFLINE"))
+      if (client.connect(clientId.c_str(), mqttBaseTopic, 1, true, "OFFLINE"))
       {
+        // Concatenate mqttBaseTopic and "doorcommand" into a variable called buffer
+        String doorCommandTopic = String(mqttBaseTopic) + "doorcommand";
 
-        int i = 11 + mqttBaseTopic.length();
-        char buffer[i + 1];
-        strcpy(buffer, mqttBaseTopic.c_str());
-        strcat(buffer, "doorcommand");
         // Once connected, publish an announcement...
         // ... and resubscribe
-        client.subscribe(buffer);
-        client.publish(mqttBaseTopic.c_str(), "ONLINE", true);
+        client.subscribe(doorCommandTopic.c_str());
+        client.publish(mqttBaseTopic, "ONLINE", true);
         digitalWrite(LED_PIN, LOW);
       }
       else
@@ -466,89 +436,24 @@ void MQTTReconnect()
   }
 }
 
+
 void publishMQTT(const char *topic, const char *message)
 {
-  // try
-  // {
+
   if (isMQTTSetup && client.connected())
   {
-    int i = strlen(topic) + mqttBaseTopic.length();
-    char buffer[i + 1];
-    strcpy(buffer, mqttBaseTopic.c_str());
-    strcat(buffer, topic);
+    // int i = strlen(topic) + mqttBaseTopic.length();
+    // char buffer[i + 1];
+    // strcpy(buffer, mqttBaseTopic.c_str());
+    // strcat(buffer, topic);
 
-    client.publish(buffer, message);
+    String fullTopic = String(mqttBaseTopic) + String(topic);
+    client.publish(fullTopic.c_str(), message);
   }
 
-  // }
-  // catch(const std::exception& e)
-  // {
-
-  // }
 }
 
-//#############################################################
-//  DHT
-//#############################################################
-void SetupDHT()
-{
-  dht.begin();
-}
 
-void HandleDHT()
-{
-
-  if (dhtReadIntervalMillis > 0 &&
-      (lastSensorCheckMillis + dhtReadIntervalMillis < millis() || lastSensorCheckMillis == 0))
-  {
-    ReadDHT();
-    lastSensorCheckMillis = millis();
-  }
-}
-
-void ReadDHT()
-{
-  // Reading temperature or humidity takes about 250 milliseconds!
-  // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
-  float h = dht.readHumidity();
-  // Read temperature as Celsius (the default)
-  // float t = dht.readTemperature();
-  // Read temperature as Fahrenheit (isFahrenheit = true)
-  float f = dht.readTemperature(true);
-
-  // if (isnan(h) || isnan(f))
-  // {
-  //   publishMQTT("environment", "DHT Fail!");
-  //   return;
-  // }
-
-  // Compute heat index in Fahrenheit (the default)
-  float hif = dht.computeHeatIndex(f, h);
-  // Compute heat index in Celsius (isFahreheit = false)
-  // float hic = dht.computeHeatIndex(t, h, false);
-
-  char buffer[6];
-
-  // if ((int)f != lastTemp)
-  // {
-  lastTemp = f;
-  itoa(lastTemp, buffer, 10);
-  publishMQTT("temp", buffer);
-  // }
-  // if ((int)h != lastHumidity)
-  // {
-  lastHumidity = h;
-  itoa(lastHumidity, buffer, 10);
-  publishMQTT("humidity", buffer);
-  // }
-  // if ((int)hif != lastHeatIndex)
-  // {
-  lastHeatIndex = hif;
-  itoa(lastHeatIndex, buffer, 10);
-  publishMQTT("heatindex", buffer);
-  sendHeatIndexUpdate = true;
-  // }
-}
 
 //########################################################
 //  Ping
@@ -770,32 +675,67 @@ void handleMQTTConfig()
   handleFileRead(path, m);
 }
 
+
+void writeConfigs()
+{
+  // Open the config file for writing
+  File configFile = LittleFS.open("/config.json", "w");
+  if (!configFile)
+  {
+    Serial.println("Failed to open config file for writing");
+    return;
+  }
+
+  // Create a JSON object to store the configurations
+  JsonDocument jsonDoc;
+
+  // Read the existing configurations from the file
+  if (configFile.size() > 0)
+  {
+    DeserializationError error = deserializeJson(jsonDoc, configFile);
+    if (error)
+    {
+      Serial.println("Failed to parse config file");
+      configFile.close();
+      return;
+    }
+  }
+
+  // Update or insert the configurations
+  jsonDoc["mqtt_host"] = mqttServer;
+  jsonDoc["mqtt_port"] = mqttPort;
+  jsonDoc["mqtt_username"] = mqttUser;
+  jsonDoc["mqtt_password"] = mqttPassword;
+  jsonDoc["mqtt_base_topic"] = mqttBaseTopic;
+  jsonDoc["wifi_ssid"] = ssid;
+  jsonDoc["wifi_password"] = password;
+
+  // Serialize the JSON object to the file
+  if (serializeJson(jsonDoc, configFile) == 0)
+  {
+    Serial.println("Failed to write to config file");
+  }
+
+  // Close the file
+  configFile.close();
+}
+
+
 void handleMQTTConfigComplete()
 {
-  mqttServer = server.arg("server");
+  mqttServer = server.arg("server").c_str();
   mqttPort = server.arg("port").toInt();
-  mqttUser = server.arg("username");
-  mqttPassword = server.arg("password");
-  mqttBaseTopic = server.arg("baseTopic");
+  mqttUser = server.arg("username").c_str();
+  mqttPassword = server.arg("password").c_str();
+  mqttBaseTopic = server.arg("baseTopic").c_str();
 
-  if (!mqttBaseTopic.isEmpty() && mqttBaseTopic[mqttBaseTopic.length() - 1] != '/')
+  String baseTopicString = String(mqttBaseTopic);
+  if (!baseTopicString.isEmpty() && mqttBaseTopic[baseTopicString.length() - 1] != '/')
   {
     mqttBaseTopic = mqttBaseTopic + '/';
   }
 
-  File file = LittleFS.open("mqttConfig.txt", "w+");
-  file.print(mqttServer);
-  file.print(',');
-  file.print(mqttPort);
-  file.print(',');
-  file.print(mqttUser);
-  file.print(',');
-  file.print(mqttPassword);
-  file.print(',');
-  file.print(mqttBaseTopic);
-  file.print(',');
-
-  file.close();
+  writeConfigs();
 
   server.sendHeader("Location", "/", true);
   server.send(302, "text/plain", "");
@@ -847,4 +787,49 @@ void handleDeviceConfigComplete()
 
   server.sendHeader("Location", "/", true);
   server.send(302, "text/plain", "");
+}
+
+
+
+
+
+void readConfig()
+{
+ // Read configs from SPIFFS
+        // If no configs, return
+        // If configs, set ssid, password, and stationMode
+        if (!LittleFS.begin()) {
+            // logger.log(LogLevel::ERROR, "Failed to mount file system");
+            return;
+        }
+        if (!LittleFS.exists("/config.json")) {
+            // logger.log(LogLevel::INFO, "No config file found");
+            return;
+        }
+        File configFile = LittleFS.open("/config.json", "r");
+        if (!configFile) {
+            // logger.log(LogLevel::ERROR, "Failed to open config file");
+            return;
+        }
+  // Parse the JSON data
+  JsonDocument jsonDoc;
+  DeserializationError error = deserializeJson(jsonDoc, configFile);
+
+  if (error)
+  {
+    // Serial.println("Failed to parse config file");
+    return;
+  }
+
+  // Read the values from the JSON document
+  ssid = jsonDoc["wifi_ssid"];
+  password = jsonDoc["wifi_password"];
+  mqttUser = jsonDoc["mqtt_username"];
+  mqttPassword = jsonDoc["mqtt_password"];
+  mqttServer = jsonDoc["mqtt_host"];
+  mqttBaseTopic = jsonDoc["mqtt_base_topic"];
+  mqttPort = jsonDoc["mqtt_port"].as<int>();
+
+  // Close the file
+  configFile.close();
 }
