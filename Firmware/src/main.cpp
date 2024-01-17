@@ -3,7 +3,7 @@
 #include <pinDefinitions.h>
 #include <climate.h>
 #include <ArduinoJson.h>
-// #include <SPIFFS.h>
+#include <ArduinoLog.h>
 
 
 #include <ESP8266WiFi.h>
@@ -103,6 +103,12 @@ void setup()
 {
   delay(100);
 
+  Serial.begin(9600);
+
+  Log.begin(LOG_LEVEL_VERBOSE, &Serial);
+
+  Log.notice("Logging Initialized");
+
   SetupPins();
 
   
@@ -139,55 +145,32 @@ void APLoop()
 
 void StationModeSetup()
 {
-  // LittleFS.begin(); // Start the SPI Flash Files System
+  Log.noticeln("Setting up Station Mode");
+  readConfig();
 
-  // if (LittleFS.exists("/creds.txt"))
-  // {
-  //   initialSetupComplete = true;
-  //   WiFi.mode(WIFI_STA);
-  //   WiFi.hostname("GarageDoorOpener");
-  //   WiFi.setAutoReconnect(true);
-  //   File file = LittleFS.open("creds.txt", "r");
-  //   file.readStringUntil(',').toCharArray(ssid, 50);
-  //   file.readString().toCharArray(password, 100);
-  //   file.close();
+  Log.noticeln("Connecting to WiFi");
+  Log.noticeln("SSID: %s", ssid);
+  Log.noticeln("Password: %s", password);
 
-    WiFi.begin(ssid, password);
-  // }
-  // else
-  // {
-  //   delay(5000);
-  //   ESP.restart();
-  // }
-
-  // if (LittleFS.exists("/pingConfig.txt"))
-  // {
-  //   File file = LittleFS.open("pingConfig.txt", "r");
-  //   ping1WarnDist = file.readStringUntil(',').toInt();
-  //   ping1StopDist = file.readStringUntil(',').toInt();
-  //   ping2WarnDist = file.readStringUntil(',').toInt();
-  //   ping2StopDist = file.readStringUntil(',').toInt();
-  //   pingSpeedMS = file.readStringUntil(',').toInt();
-  //   file.close();
-  // }
-
-  // if (LittleFS.exists("/dhtConfig.txt"))
-  // {
-  //   File file = LittleFS.open("dhtConfig.txt", "r");
-  //   dhtReadIntervalMillis = file.readStringUntil(',').toInt();
-  //   file.close();
-  // }
+  WiFi.begin(ssid, password);
 
   int i = 0;
   while (WiFi.waitForConnectResult() != WL_CONNECTED)
   {
+    Log.noticeln("Connection Failed!");
     // Wait for the Wi-Fi to connect
     delay(250);
     if (++i > 20)
     {
+      Log.noticeln("Connection Failed 20 times! Rebooting...");
+      delay(250);
       ESP.restart();
     }
   }
+
+  Log.noticeln("Connected!");
+  Log.noticeln("IP address: %s", WiFi.localIP().toString().c_str());
+
 
   MDNS.begin("GarageDoorOpener");
 
@@ -215,10 +198,12 @@ void StationModeSetup()
   SetupInterrupts();
   ReadDoorState();
   digitalWrite(PING_1_TRIG_PIN, LOW);
+
 }
 
 void loop()
 {
+  Log.noticeln("Looping");
   ArduinoOTA.handle();
   server.handleClient();
   if (!client.connected())
@@ -243,6 +228,7 @@ void loop()
 
 void SetupPins()
 {
+  Log.notice("Setting up pins");
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);
   pinMode(RELAY_PIN, OUTPUT);
@@ -251,7 +237,7 @@ void SetupPins()
   pinMode(PING_ECHO_PIN, INPUT);
   pinMode(DOOR_CLOSED_SENSOR_PIN, INPUT_PULLUP);
   pinMode(DOOR_OPEN_SENSOR_PIN, INPUT_PULLUP);
-  // pinMode(DHT_PIN, INPUT);
+  Log.notice("Pins setup");
 }
 
 //################################################
@@ -377,11 +363,12 @@ void DoorToggleTimerCallback(void *pArg)
 //################################################
 void SetupMQTT()
 {
+  Log.noticeln("Setting up MQTT");
     client.setServer(mqttServer, mqttPort);
 
     client.setCallback(MQTTCallback);
     isMQTTSetup = true;
-  // }
+  Log.noticeln("MQTT setup complete");
 }
 
 void MQTTCallback(char *topic, byte *payload, unsigned int length)
@@ -796,28 +783,28 @@ void handleDeviceConfigComplete()
 void readConfig()
 {
  // Read configs from SPIFFS
-        // If no configs, return
-        // If configs, set ssid, password, and stationMode
-        if (!LittleFS.begin()) {
-            // logger.log(LogLevel::ERROR, "Failed to mount file system");
-            return;
-        }
-        if (!LittleFS.exists("/config.json")) {
-            // logger.log(LogLevel::INFO, "No config file found");
-            return;
-        }
-        File configFile = LittleFS.open("/config.json", "r");
-        if (!configFile) {
-            // logger.log(LogLevel::ERROR, "Failed to open config file");
-            return;
-        }
+  // If no configs, return
+  // If configs, set ssid, password, and stationMode
+  if (!LittleFS.begin()) {
+    Log.noticeln("Failed to mount file system");
+    return;
+  }
+  if (!LittleFS.exists("config.json")) {
+    Log.noticeln("No config file found");
+    return;
+  }
+  File configFile = LittleFS.open("config.json", "r");
+  if (!configFile) {
+    Log.noticeln("Failed to open config file");
+    return;
+  }
   // Parse the JSON data
   JsonDocument jsonDoc;
   DeserializationError error = deserializeJson(jsonDoc, configFile);
 
   if (error)
   {
-    // Serial.println("Failed to parse config file");
+    Log.noticeln("Failed to parse config file");
     return;
   }
 
@@ -832,4 +819,5 @@ void readConfig()
 
   // Close the file
   configFile.close();
+  Log.noticeln("Config file read");
 }
