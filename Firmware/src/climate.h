@@ -11,18 +11,13 @@ struct ClimateData {
   float heatIndexF;
 };
 
-extern DHT dht;
-extern int lastTemp;
-extern int lastHumidity;
-extern int lastHeatIndex;
-extern unsigned long lastSensorCheckMillis;
-extern bool sendTempUpdate;
-extern bool sendHumidityUpdate;
-extern bool sendHeatIndexUpdate;
-extern unsigned long dhtReadIntervalMillis;
+extern unsigned long dhtReadIntervalMillis; // 0 = sensor off
+extern ClimateData lastClimate;
+extern bool lastClimateValid;
 
 void SetupDHT();
-ClimateData CheckDHT();
-ClimateData ReadFromDHT();
+// Reads the sensor when the read interval has elapsed. Returns true and fills
+// `data` only when a fresh, valid reading was taken.
+bool CheckDHT(ClimateData &data);
 
 #endif // CLIMATE_H

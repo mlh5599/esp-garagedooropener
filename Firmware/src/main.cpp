@@ -2,80 +2,93 @@
 #include <Arduino.h>
 #include <pinDefinitions.h>
 #include <climate.h>
-#include <ArduinoJson.h>
+#include <homeassistant.h>
+#include <settings.h>
+#include <webui.h>
 #include <ArduinoLog.h>
-
 
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
-#include <WiFiUdp.h>
 #include <ArduinoOTA.h>
-#include <NewPing.h>
-
 #include <PubSubClient.h>
-#include <ESP8266WebServer.h>
-#include <LittleFS.h>
-#include <string.h>
 #include <Ultrasonic.h>
 
+#define DEVICE_HOSTNAME "GarageDoorOpener"
 
-//#########################################
-//  WebServer Items
-//#########################################
+// How long to wait for Wi-Fi at boot. New (unverified) credentials that
+// don't connect in time drop back to setup mode; verified ones restart and retry.
+#define WIFI_NEW_CREDENTIALS_TIMEOUT_MS 30000UL
+#define WIFI_KNOWN_CREDENTIALS_TIMEOUT_MS 60000UL
 
-bool initialSetupComplete = false;
-ESP8266WebServer server(80);
+// When setup mode was entered because new credentials failed, restart and
+// try them again after this long (the router may just have been down).
+#define SETUP_MODE_RETRY_MS (5UL * 60UL * 1000UL)
 
+// MQTT reconnects back off from 5s to 60s while the broker is unreachable,
+// since each attempt blocks the loop (DNS + TCP connect + CONNACK wait).
+#define MQTT_RETRY_MIN_MS 5000UL
+#define MQTT_RETRY_MAX_MS 60000UL
+#define MQTT_CONNECT_TIMEOUT_MS 3000
+#define MQTT_CONNACK_TIMEOUT_S 5
+
+#define DIAGNOSTICS_INTERVAL_MS 60000UL
+
+#define DOOR_DEBOUNCE_MS 500UL
+// A door still between the sensors after this long has stopped part way.
+#define DOOR_TRAVEL_TIMEOUT_MS 30000UL
+// Live parking readings (setup page): one bay is read per tick, so each bay
+// updates every 2 ticks. Live mode ends this long after the page's last poll.
+#define PARKING_LIVE_TICK_MS 100UL
+#define PARKING_LIVE_HOLD_MS 5000UL
 
 //###########################################
-//  WiFi Defs
+//  Mode / restart
 //###########################################
-WiFiClient espClient;
-const char* ssid;
-const char* password;
+bool setupMode = false;
+unsigned long setupModeStartMillis = 0;
+unsigned long setupModeRetryMs = 0; // 0 = stay in setup mode until configured
+bool restartRequested = false;
+unsigned long restartRequestMillis = 0;
+unsigned long restartDelayMs = 0;
 
 //###########################################
 //  MQTT Defs
 //###########################################
+WiFiClient espClient;
 PubSubClient client(espClient);
 bool isMQTTSetup = false;
-const char* mqttUser;
-const char* mqttPassword;
-const char* mqttServer;
-const char* mqttBaseTopic;
-int mqttPort;
+bool haAnnouncePending = false;
+unsigned long lastMQTTAttemptMillis = 0;
+unsigned long mqttRetryDelayMs = MQTT_RETRY_MIN_MS;
+unsigned long lastDiagnosticsMillis = 0;
 
 //###########################################
-//  Ping Defs
+//  Parking Defs
 //###########################################
 #define DIST_STATE_UNKNOWN 0
 #define DIST_STATE_NORMAL 1
 #define DIST_STATE_WARN 2
 #define DIST_STATE_STOP 3
 
-Ultrasonic ping1(PING_1_TRIG_PIN, PING_ECHO_PIN);
-Ultrasonic ping2(PING_2_TRIG_PIN, PING_ECHO_PIN);
+struct ParkingBay
+{
+  Ultrasonic sensor;
+  const char *topic;
+  unsigned int status;
+  int distanceCm; // last raw reading: -1 = none yet, 0 = no echo
+};
 
+ParkingBay bay1 = {Ultrasonic(PING_1_TRIG_PIN, PING_ECHO_PIN), "bay1/parkingstate", DIST_STATE_UNKNOWN, -1};
+ParkingBay bay2 = {Ultrasonic(PING_2_TRIG_PIN, PING_ECHO_PIN), "bay2/parkingstate", DIST_STATE_UNKNOWN, -1};
 unsigned long lastPingMillis = 0;
-unsigned int lastPing1Dist = 0;
-unsigned int lastPing2Dist = 0;
-unsigned int lastPing1Status = DIST_STATE_UNKNOWN;
-unsigned int lastPing2Status = DIST_STATE_UNKNOWN;
-
-unsigned int ping1WarnDist = 0;
-unsigned int ping1StopDist = 0;
-unsigned int ping2WarnDist = 0;
-unsigned int ping2StopDist = 0;
-unsigned long pingSpeedMS = 0;
+bool parkingLive = false;
+unsigned long parkingLiveMillis = 0;
+bool liveReadBay2 = false;
 
 //###########################################
 //  Door Defs
 //###########################################
 os_timer_t doorToggleTimer;
-bool sendDoorStateUpdate = true;
-bool toggleOpener = false;
-bool initialDoorStatePublished = false;
-volatile bool doorStateChanged = true;
 
 enum DoorState
 {
@@ -84,17 +97,20 @@ enum DoorState
   Opening,
   Closed,
   Closing,
+  Stopped, // between the sensors and no longer moving; reported as Open
   Initial
 };
-volatile DoorState currentDoorState = Initial;
-volatile DoorState lastDoorState = Initial;
+const char *DoorStateName(DoorState state);
+const char *ParkingStateName(unsigned int status);
+
+DoorState currentDoorState = Initial;
+DoorState lastDoorState = Initial;
 unsigned long lastDoorStateChangeMillis = 0;
 
 //###########################################
 //  Motion Defs
 //###########################################
-volatile bool motionChangeDetected = true;
-volatile bool currentMotionState = false;
+bool currentMotionState = false;
 
 //###########################################
 //  Setup
@@ -103,109 +119,169 @@ void setup()
 {
   delay(100);
 
+  // Serial is off by default: its TX/RX pins drive the DHT (GPIO1) and the
+  // bay 2 sensor (GPIO3). Without Log.begin, Log calls stay silent.
+  // See build_flags in platformio.ini.
+#ifdef SERIAL_LOGGING
   Serial.begin(9600);
-
   Log.begin(LOG_LEVEL_VERBOSE, &Serial);
-
-  Log.notice("Logging Initialized");
+  Log.noticeln("Logging Initialized");
+#endif
 
   SetupPins();
+  MountFileSystem();
+  LoadSettings();
 
-  
-  // if(!digitalRead(DOOR_CLOSED_SENSOR_PIN) && !digitalRead(DOOR_OPEN_SENSOR_PIN))
-  // {
-  //   APModeSetup();
-  // }
-  // else
-  // {
-  StationModeSetup();
-  // }
-}
+  // config.json is the only place credentials live; stop the Wi-Fi SDK from
+  // saving its own copy to flash and auto-connecting with stale ones.
+  WiFi.persistent(false);
+  WiFi.setAutoConnect(false);
 
-void APModeSetup()
-{
-  // delay(1000);
-  // WiFi.softAP(apssid);
-  // WiFi.softAPConfig(IPAddress(192,168,101,1), IPAddress(0,0,0,0), IPAddress(255,255,255,0));
+  // Grounding both door sensor inputs at power-up (a state a real door can't
+  // produce) forces setup mode, e.g. after the Wi-Fi password changes.
+  delay(10);
+  bool forceSetup = !digitalRead(DOOR_CLOSED_SENSOR_PIN) && !digitalRead(DOOR_OPEN_SENSOR_PIN);
 
-  // server.on("/", handleRoot);
-  // server.on("/post", handleSubmit);
-  // server.begin();
-
-  // APLoop();
-}
-
-void APLoop()
-{
-  while (1)
+  if (forceSetup)
   {
-    server.handleClient();
+    Log.noticeln("Both door sensor inputs grounded; entering setup mode");
+    StartSetupMode(0);
+  }
+  else if (!HasWiFiSettings())
+  {
+    Log.noticeln("No Wi-Fi settings; entering setup mode");
+    StartSetupMode(0);
+  }
+  else
+  {
+    StartNormalMode();
   }
 }
 
-void StationModeSetup()
+String SetupHotspotName()
 {
-  Log.noticeln("Setting up Station Mode");
-  readConfig();
+  char name[24];
+  snprintf(name, sizeof(name), "GarageDoor-%06X", ESP.getChipId());
+  return String(name);
+}
 
-  Log.noticeln("Connecting to WiFi");
-  Log.noticeln("SSID: %s", ssid);
-  Log.noticeln("Password: %s", password);
+void StartSetupMode(unsigned long retryAfterMs)
+{
+  setupMode = true;
+  setupModeStartMillis = millis();
+  setupModeRetryMs = retryAfterMs;
 
-  WiFi.begin(ssid, password);
+  // The station side stays enabled only so the setup page can list networks.
+  WiFi.disconnect();
+  WiFi.mode(WIFI_AP_STA);
+  WebUIScanNetworks();
 
-  int i = 0;
-  while (WiFi.waitForConnectResult() != WL_CONNECTED)
+  String hotspot = SetupHotspotName();
+  WiFi.softAP(hotspot.c_str());
+  Log.noticeln("Setup hotspot %s started, open http://%s/", hotspot.c_str(), WiFi.softAPIP().toString().c_str());
+
+  WebUIBeginSetupMode(hotspot);
+}
+
+bool WaitForWiFi(unsigned long timeoutMs)
+{
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED)
   {
-    Log.noticeln("Connection Failed!");
-    // Wait for the Wi-Fi to connect
+    if (millis() - start > timeoutMs)
+      return false;
     delay(250);
-    if (++i > 20)
+  }
+  return true;
+}
+
+void StartNormalMode()
+{
+  Log.noticeln("Connecting to Wi-Fi network %s", settings.wifiSsid.c_str());
+
+  WiFi.mode(WIFI_STA);
+  // Always powered, so trade a little power for snappier commands and pages.
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+  WiFi.hostname(DEVICE_HOSTNAME);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(settings.wifiSsid.c_str(), settings.wifiPassword.c_str());
+
+  if (!WaitForWiFi(settings.wifiVerified ? WIFI_KNOWN_CREDENTIALS_TIMEOUT_MS : WIFI_NEW_CREDENTIALS_TIMEOUT_MS))
+  {
+    if (!settings.wifiVerified)
     {
-      Log.noticeln("Connection Failed 20 times! Rebooting...");
-      delay(250);
-      ESP.restart();
+      Log.noticeln("Couldn't connect with the new Wi-Fi settings; entering setup mode");
+      StartSetupMode(SETUP_MODE_RETRY_MS);
+      return;
     }
+    Log.noticeln("Couldn't connect to Wi-Fi; restarting to try again");
+    delay(250);
+    ESP.restart();
   }
 
-  Log.noticeln("Connected!");
-  Log.noticeln("IP address: %s", WiFi.localIP().toString().c_str());
+  Log.noticeln("Connected, IP address: %s", WiFi.localIP().toString().c_str());
 
+  if (!settings.wifiVerified)
+  {
+    settings.wifiVerified = true;
+    SaveSettings();
+  }
 
-  MDNS.begin("GarageDoorOpener");
-
-  server.on("/", handleRoot);
-  server.on("/wifiSetup", handleWiFiSetup);
-  server.on("/wifiSetupComplete", handleWiFiSetupComplete);
-  server.on("/mqttConfig", handleMQTTConfig);
-  server.on("/mqttConfigComplete", handleMQTTConfigComplete);
-  server.on("/deviceConfig", handleDeviceConfig);
-  server.on("/deviceConfigComplete", handleDeviceConfigComplete);
-
-  // server.onNotFound([]() {                              // If the client requests any URI
-  //   if (!handleFileRead(server.uri()))                  // send it if it exists
-  //     server.send(404, "text/plain", "404: Not Found"); // otherwise, respond with a 404 (Not Found) error
-  // });
-
-  server.begin(); // Actually start the server
-
+  MDNS.begin(DEVICE_HOSTNAME);
+  WebUIBeginNormalMode();
   SetupOTA();
-
-  SetupMQTT();
+  MDNS.addService("http", "tcp", 80);
 
   SetupDHT();
-  // MQTTReconnect();
+  ApplySensorSettings();
+  ApplyMQTTSettings();
   SetupInterrupts();
   ReadDoorState();
   digitalWrite(PING_1_TRIG_PIN, LOW);
-
 }
 
+void RequestRestart(unsigned long delayMs)
+{
+  // Restart from loop() so the web response has time to reach the browser.
+  restartRequested = true;
+  restartRequestMillis = millis();
+  restartDelayMs = delayMs;
+}
+
+unsigned long UptimeSeconds()
+{
+  // 64-bit so it doesn't wrap after 49 days like millis().
+  return (unsigned long)(micros64() / 1000000ULL);
+}
+
+//###########################################
+//  Loop
+//###########################################
 void loop()
 {
-  Log.noticeln("Looping");
-  ArduinoOTA.handle();
-  server.handleClient();
+  WebUILoop();
+
+  if (restartRequested && millis() - restartRequestMillis >= restartDelayMs)
+  {
+    Log.noticeln("Restarting");
+    delay(100);
+    ESP.restart();
+  }
+
+  if (setupMode)
+  {
+    // Slow blink while waiting to be set up (LED is active low)
+    digitalWrite(LED_PIN, (millis() / 1000) % 2 ? HIGH : LOW);
+
+    if (setupModeRetryMs > 0 && millis() - setupModeStartMillis > setupModeRetryMs && WiFi.softAPgetStationNum() == 0)
+    {
+      Log.noticeln("Setup mode timed out; restarting to retry Wi-Fi");
+      ESP.restart();
+    }
+    return;
+  }
+
+  ArduinoOTA.handle(); // also services mDNS
   if (!client.connected())
   {
     MQTTReconnect();
@@ -214,21 +290,28 @@ void loop()
   {
     client.loop();
   }
-  // if (!initialDoorStatePublished)
-  // {
-  //   publishMQTT("door", lastDoorState);
-  //   initialDoorStatePublished = true;
-  // }
-  CheckDHT();
+
+  if (haAnnouncePending && client.connected())
+  {
+    AnnounceToHomeAssistant();
+  }
+  if (client.connected() && millis() - lastDiagnosticsMillis >= DIAGNOSTICS_INTERVAL_MS)
+  {
+    PublishDiagnostics();
+  }
+  ClimateData climate;
+  if (CheckDHT(climate))
+  {
+    PublishClimate(climate);
+  }
   HandlePing();
   HandleMotion();
   HandleDoorState();
-  // PublishDoorState();
 }
 
 void SetupPins()
 {
-  Log.notice("Setting up pins");
+  Log.noticeln("Setting up pins");
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);
   pinMode(RELAY_PIN, OUTPUT);
@@ -237,56 +320,72 @@ void SetupPins()
   pinMode(PING_ECHO_PIN, INPUT);
   pinMode(DOOR_CLOSED_SENSOR_PIN, INPUT_PULLUP);
   pinMode(DOOR_OPEN_SENSOR_PIN, INPUT_PULLUP);
-  Log.notice("Pins setup");
+  Log.noticeln("Pins setup");
+}
+
+void ApplySensorSettings()
+{
+  dhtReadIntervalMillis = settings.dhtReadIntervalSeconds * 1000UL;
+  // The climate sensors' expiry in Home Assistant follows the read interval.
+  if (client.connected())
+    haAnnouncePending = true;
+}
+
+DeviceStatus GetDeviceStatus()
+{
+  DeviceStatus status;
+  status.door = DoorStateName(currentDoorState);
+  status.motion = currentMotionState;
+  status.bay1 = ParkingStateName(bay1.status);
+  status.bay2 = ParkingStateName(bay2.status);
+  status.bay1Cm = bay1.distanceCm;
+  status.bay2Cm = bay2.distanceCm;
+  status.parkingLive = ParkingLiveActive();
+  status.mqttConfigured = isMQTTSetup;
+  status.mqttConnected = client.connected();
+  return status;
 }
 
 //################################################
 //  Motion
 //################################################
-// ICACHE_RAM_ATTR void MotionDetected()
-// {
-//   detachInterrupt(digitalPinToInterrupt(MOTION_PIN));
-//   motionChangeDetected = true;
-//   currentMotionState = digitalRead(MOTION_PIN);
-// }
-
 void HandleMotion()
 {
-  int newMotionState = digitalRead(MOTION_PIN);
+  bool newMotionState = digitalRead(MOTION_PIN);
   if (newMotionState != currentMotionState)
   {
-    if (newMotionState)
-      publishMQTT("motion", "Motion Detected");
-    else
-      publishMQTT("motion", "Clear");
-
+    publishMQTT("motion", newMotionState ? "Motion Detected" : "Clear");
     currentMotionState = newMotionState;
-    // attachInterrupt(digitalPinToInterrupt(MOTION_PIN), MotionDetected, CHANGE);
   }
 }
 
 //################################################
 //  Door State
 //################################################
+const char *DoorStateName(DoorState state)
+{
+  switch (state)
+  {
+  case Open:
+  case Stopped: // Home Assistant treats a partly open door as open
+    return "Open";
+  case Closed:
+    return "Closed";
+  case Opening:
+    return "Opening";
+  case Closing:
+    return "Closing";
+  default:
+    return "Unknown";
+  }
+}
 
 void ReadDoorState()
 {
   int closedSensor = digitalRead(DOOR_CLOSED_SENSOR_PIN);
   int openSensor = digitalRead(DOOR_OPEN_SENSOR_PIN);
 
-  if (closedSensor && openSensor)
-  {
-    if (lastDoorState != Closing && lastDoorState != Opening)
-    {
-      if (lastDoorState == Closed)
-        currentDoorState = Opening;
-      else if (lastDoorState == Open)
-        currentDoorState = Closing;
-      else
-        currentDoorState = Unknown;
-    }
-  }
-  else if (!closedSensor)
+  if (!closedSensor)
   {
     currentDoorState = Closed;
   }
@@ -294,39 +393,40 @@ void ReadDoorState()
   {
     currentDoorState = Open;
   }
+  else if (lastDoorState == Closed)
+  {
+    currentDoorState = Opening;
+  }
+  else if (lastDoorState == Open)
+  {
+    currentDoorState = Closing;
+  }
+  else if (lastDoorState != Opening && lastDoorState != Closing && lastDoorState != Stopped)
+  {
+    // Between the sensors with no history (e.g. at boot)
+    currentDoorState = Unknown;
+  }
 }
 
 void HandleDoorState()
 {
-  //Startup || millis() rollover || new state within debounce time
-  if (lastDoorStateChangeMillis == 0 || lastDoorStateChangeMillis > millis() || millis() - lastDoorStateChangeMillis > 500)
+  if (lastDoorStateChangeMillis != 0 && millis() - lastDoorStateChangeMillis < DOOR_DEBOUNCE_MS)
+    return;
+
+  ReadDoorState();
+
+  if ((currentDoorState == Opening || currentDoorState == Closing) &&
+      millis() - lastDoorStateChangeMillis > DOOR_TRAVEL_TIMEOUT_MS)
   {
-    ReadDoorState();
+    currentDoorState = Stopped;
+  }
 
-    if (currentDoorState != lastDoorState)
-    {
-      switch (currentDoorState)
-      {
-      case Open:
-        publishMQTT("door", "Open");
-        break;
-      case Closed:
-        publishMQTT("door", "Closed");
-        break;
-      case Opening:
-        publishMQTT("door", "Opening");
-        break;
-      case Closing:
-        publishMQTT("door", "Closing");
-        break;
-      default:
-        publishMQTT("door", "Unknown");
-        break;
-      }
+  if (currentDoorState != lastDoorState)
+  {
+    publishMQTT("door", DoorStateName(currentDoorState));
 
-      lastDoorState = currentDoorState;
-      lastDoorStateChangeMillis = millis();
-    }
+    lastDoorState = currentDoorState;
+    lastDoorStateChangeMillis = millis();
   }
 }
 
@@ -338,7 +438,7 @@ void HandleDoorToggle()
 
 void HandleDoorOpen()
 {
-  if(currentDoorState == Closed || currentDoorState == Closed)
+  if (currentDoorState == Closed || currentDoorState == Closing)
   {
     HandleDoorToggle();
   }
@@ -346,7 +446,7 @@ void HandleDoorOpen()
 
 void HandleDoorClose()
 {
-  if(currentDoorState == Open || currentDoorState == Opening)
+  if (currentDoorState == Open || currentDoorState == Opening || currentDoorState == Stopped)
   {
     HandleDoorToggle();
   }
@@ -361,33 +461,45 @@ void DoorToggleTimerCallback(void *pArg)
 //################################################
 //  MQTT
 //################################################
-void SetupMQTT()
+void ApplyMQTTSettings()
 {
-  Log.noticeln("Setting up MQTT");
-    client.setServer(mqttServer, mqttPort);
-
-    client.setCallback(MQTTCallback);
-    isMQTTSetup = true;
-  Log.noticeln("MQTT setup complete");
+  client.disconnect();
+  // PubSubClient keeps this pointer, so call this again whenever mqttHost changes.
+  client.setServer(settings.mqttHost.c_str(), settings.mqttPort);
+  client.setCallback(MQTTCallback);
+  espClient.setTimeout(MQTT_CONNECT_TIMEOUT_MS); // DNS lookup and TCP connect
+  client.setSocketTimeout(MQTT_CONNACK_TIMEOUT_S);
+  isMQTTSetup = !settings.mqttHost.isEmpty();
+  lastMQTTAttemptMillis = 0;
+  mqttRetryDelayMs = MQTT_RETRY_MIN_MS;
+  if (!isMQTTSetup)
+    digitalWrite(LED_PIN, HIGH);
 }
 
 void MQTTCallback(char *topic, byte *payload, unsigned int length)
 {
+  if (length == 0)
+    return;
 
-  for (unsigned int i = 0; i < length; i++)
+  // Home Assistant publishes "online" here when it (re)starts. Re-announce
+  // from loop() rather than here, since publishing reuses the receive buffer.
+  if (HAStatusTopic(settings.haDiscoveryPrefix) == topic)
   {
+    if (length == 6 && memcmp(payload, "online", 6) == 0)
+      haAnnouncePending = true;
+    return;
   }
 
-  // Switch on the LED if an 1 was received as first character
+  // Door commands: OPEN, CLOSE, TOGGLE (only the first character is checked)
   if ((char)payload[0] == 'T')
   {
     HandleDoorToggle();
   }
-  else if((char)payload[0] == 'O')
+  else if ((char)payload[0] == 'O')
   {
     HandleDoorOpen();
   }
-  else if((char)payload[0] == 'C')
+  else if ((char)payload[0] == 'C')
   {
     HandleDoorClose();
   }
@@ -395,163 +507,225 @@ void MQTTCallback(char *topic, byte *payload, unsigned int length)
 
 void MQTTReconnect()
 {
-  if (isMQTTSetup)
-  {
-    //Loop until we're reconnected
-    if (!client.connected() && WiFi.isConnected())
-    {
-      // Create a random client ID
-      String clientId = WiFi.hostname();
-      clientId += String(random(0xffff), HEX);
-      // Attempt to connect
-      if (client.connect(clientId.c_str(), mqttBaseTopic, 1, true, "OFFLINE"))
-      {
-        // Concatenate mqttBaseTopic and "doorcommand" into a variable called buffer
-        String doorCommandTopic = String(mqttBaseTopic) + "doorcommand";
+  if (!isMQTTSetup || client.connected() || !WiFi.isConnected())
+    return;
 
-        // Once connected, publish an announcement...
-        // ... and resubscribe
-        client.subscribe(doorCommandTopic.c_str());
-        client.publish(mqttBaseTopic, "ONLINE", true);
-        digitalWrite(LED_PIN, LOW);
-      }
-      else
-      {
-        digitalWrite(LED_PIN, HIGH);
-      }
-    }
+  if (lastMQTTAttemptMillis != 0 && millis() - lastMQTTAttemptMillis < mqttRetryDelayMs)
+    return;
+  lastMQTTAttemptMillis = millis();
+
+  // A stable client ID lets the broker replace a stale session from before a
+  // power cut instead of keeping both.
+  String clientId = HADeviceId();
+
+  // Attempt to connect (with credentials if configured), using the base
+  // topic as the last will so Home Assistant sees the device go offline.
+  const char *user = settings.mqttUser.isEmpty() ? nullptr : settings.mqttUser.c_str();
+  const char *pass = settings.mqttPassword.isEmpty() ? nullptr : settings.mqttPassword.c_str();
+  const char *willTopic = settings.mqttBaseTopic.c_str();
+  if (client.connect(clientId.c_str(), user, pass, willTopic, 1, true, "OFFLINE"))
+  {
+    mqttRetryDelayMs = MQTT_RETRY_MIN_MS;
+    String doorCommandTopic = settings.mqttBaseTopic + "doorcommand";
+
+    // Clear any retained command before subscribing. Otherwise the broker
+    // would replay it on every reconnect and move the door.
+    client.publish(doorCommandTopic.c_str(), "", true);
+    client.subscribe(doorCommandTopic.c_str());
+    client.subscribe(HAStatusTopic(settings.haDiscoveryPrefix).c_str());
+    client.publish(willTopic, "ONLINE", true);
+    AnnounceToHomeAssistant();
+    digitalWrite(LED_PIN, LOW);
+  }
+  else
+  {
+    mqttRetryDelayMs = min(mqttRetryDelayMs * 2, MQTT_RETRY_MAX_MS);
+    Log.noticeln("MQTT connection failed, state %d; retrying in %lus", client.state(), mqttRetryDelayMs / 1000);
+    digitalWrite(LED_PIN, HIGH);
   }
 }
 
+void ForgetMQTTTopics(const String &baseTopic, const String &discoveryPrefix, bool removeDevice)
+{
+  // Stay off the broker until ApplyMQTTSettings() (or a restart) sets it up again.
+  isMQTTSetup = false;
+  if (!client.connected())
+    return;
+  if (removeDevice)
+    ClearHADiscovery(client, discoveryPrefix);
+  client.publish(baseTopic.c_str(), "", true); // retained ONLINE/OFFLINE
+  // A clean disconnect stops the broker from publishing the retained
+  // "OFFLINE" last will back onto the topic we just cleared.
+  client.disconnect();
+}
 
 void publishMQTT(const char *topic, const char *message)
 {
-
   if (isMQTTSetup && client.connected())
   {
-    // int i = strlen(topic) + mqttBaseTopic.length();
-    // char buffer[i + 1];
-    // strcpy(buffer, mqttBaseTopic.c_str());
-    // strcat(buffer, topic);
-
-    String fullTopic = String(mqttBaseTopic) + String(topic);
+    String fullTopic = settings.mqttBaseTopic + topic;
     client.publish(fullTopic.c_str(), message);
   }
-
 }
 
+void PublishClimate(const ClimateData &data)
+{
+  publishMQTT("temperature", String(data.temperatureF, 1).c_str());
+  publishMQTT("humidity", String(data.humidity, 1).c_str());
+  publishMQTT("heatindex", String(data.heatIndexF, 1).c_str());
+}
 
+void PublishDiagnostics()
+{
+  lastDiagnosticsMillis = millis();
+  publishMQTT("rssi", String(WiFi.RSSI()).c_str());
+  publishMQTT("uptime", String(UptimeSeconds()).c_str());
+}
+
+const char *ParkingStateName(unsigned int status)
+{
+  switch (status)
+  {
+  case DIST_STATE_NORMAL:
+    return "NORMAL";
+  case DIST_STATE_WARN:
+    return "WARN";
+  case DIST_STATE_STOP:
+    return "STOP";
+  default:
+    return nullptr;
+  }
+}
+
+// State messages aren't retained, so after (re)connecting or after Home
+// Assistant restarts, send everything we currently know.
+void PublishAllStates()
+{
+  publishMQTT("door", DoorStateName(currentDoorState));
+  publishMQTT("motion", currentMotionState ? "Motion Detected" : "Clear");
+
+  if (lastClimateValid)
+    PublishClimate(lastClimate);
+
+  if (ParkingEnabled())
+  {
+    for (ParkingBay *bay : {&bay1, &bay2})
+    {
+      const char *name = ParkingStateName(bay->status);
+      publishMQTT(bay->topic, name ? name : "UNKNOWN");
+    }
+  }
+
+  PublishDiagnostics();
+}
+
+void AnnounceToHomeAssistant()
+{
+  haAnnouncePending = false;
+  PublishHADiscovery(client, settings.mqttBaseTopic, settings.haDiscoveryPrefix, settings.dhtReadIntervalSeconds,
+                     ParkingEnabled());
+  PublishAllStates();
+}
 
 //########################################################
-//  Ping
+//  Parking
 //########################################################
+void SetBayStatus(ParkingBay &bay, unsigned int status)
+{
+  if (bay.status == status)
+    return;
+  bay.status = status;
+  if (!ParkingEnabled())
+    return; // not in Home Assistant
+  const char *name = ParkingStateName(status);
+  publishMQTT(bay.topic, name ? name : "UNKNOWN");
+}
+
+bool ParkingEnabled()
+{
+  return settings.pingSpeedMS > 0;
+}
+
+void StartParkingLiveReadings()
+{
+  parkingLive = true;
+  parkingLiveMillis = millis();
+}
+
+bool ParkingLiveActive()
+{
+  if (parkingLive && millis() - parkingLiveMillis >= PARKING_LIVE_HOLD_MS)
+    parkingLive = false;
+  return parkingLive;
+}
+
+// Takes a reading. When `report` is false only the raw distance is updated.
+void ReadBay(ParkingBay &bay, unsigned int warnDist, unsigned int stopDist, bool report)
+{
+  // 0 means no echo came back: the sensor is missing or failed.
+  unsigned int dist = bay.sensor.read();
+  bay.distanceCm = (int)dist;
+  if (!report)
+    return;
+  if (dist == 0)
+    SetBayStatus(bay, DIST_STATE_UNKNOWN);
+  else if (dist <= stopDist)
+    SetBayStatus(bay, DIST_STATE_STOP);
+  else if (dist <= warnDist)
+    SetBayStatus(bay, DIST_STATE_WARN);
+  else
+    SetBayStatus(bay, DIST_STATE_NORMAL);
+}
+
 void HandlePing()
 {
-  if (currentDoorState == Open && pingSpeedMS > 0)
+  // Parking states are only reported while the door is fully open.
+  bool report = currentDoorState == Open && settings.pingSpeedMS > 0;
+  if (!report)
   {
-    if (pingSpeedMS > 0 && millis() > lastPingMillis + pingSpeedMS)
-    {
-      lastPing1Dist = ping1.read();
-      char buffer[10];
-      sprintf(buffer, "%u", lastPing1Dist);
-
-      lastPing2Dist = ping2.read();
-      sprintf(buffer, "%u", lastPing2Dist);
-
-      lastPingMillis = millis();
-
-      if (lastPing1Dist <= ping1StopDist)
-      {
-        if (lastPing1Status != DIST_STATE_STOP)
-        {
-          publishMQTT("bay1/parkingstate", "STOP");
-          lastPing1Status = DIST_STATE_STOP;
-        }
-      }
-      else if (lastPing1Dist <= ping1WarnDist)
-      {
-        if (lastPing1Status != DIST_STATE_WARN)
-        {
-          publishMQTT("bay1/parkingstate", "WARN");
-          lastPing1Status = DIST_STATE_WARN;
-        }
-      }
-      else
-      {
-        if (lastPing1Status != DIST_STATE_NORMAL)
-        {
-          publishMQTT("bay1/parkingstate", "NORMAL");
-          lastPing1Status = DIST_STATE_NORMAL;
-        }
-      }
-
-      if (lastPing2Dist <= ping2StopDist)
-      {
-        if (lastPing2Status != DIST_STATE_STOP)
-        {
-          publishMQTT("bay2/parkingstate", "STOP");
-          lastPing2Status = DIST_STATE_STOP;
-        }
-      }
-      else if (lastPing2Dist <= ping2WarnDist)
-      {
-        if (lastPing2Status != DIST_STATE_WARN)
-        {
-          publishMQTT("bay2/parkingstate", "WARN");
-          lastPing2Status = DIST_STATE_WARN;
-        }
-      }
-      else
-      {
-        if (lastPing2Status != DIST_STATE_NORMAL)
-        {
-          publishMQTT("bay2/parkingstate", "NORMAL");
-          lastPing2Status = DIST_STATE_NORMAL;
-        }
-      }
-    }
+    SetBayStatus(bay1, DIST_STATE_UNKNOWN);
+    SetBayStatus(bay2, DIST_STATE_UNKNOWN);
   }
+
+  if (ParkingLiveActive())
+  {
+    // Fast readings for setting the distances, whatever the door is doing.
+    // The bays share an echo line, so alternate to let each ping die out.
+    if (millis() - lastPingMillis < PARKING_LIVE_TICK_MS)
+      return;
+    lastPingMillis = millis();
+    if (liveReadBay2)
+      ReadBay(bay2, settings.ping2WarnDist, settings.ping2StopDist, report);
+    else
+      ReadBay(bay1, settings.ping1WarnDist, settings.ping1StopDist, report);
+    liveReadBay2 = !liveReadBay2;
+    return;
+  }
+
+  if (!report || millis() - lastPingMillis < settings.pingSpeedMS)
+    return;
+  lastPingMillis = millis();
+
+  ReadBay(bay1, settings.ping1WarnDist, settings.ping1StopDist, true);
+  ReadBay(bay2, settings.ping2WarnDist, settings.ping2StopDist, true);
 }
 
 //########################################################
-//  WiFi
+//  OTA / timers
 //########################################################
-void SetupWiFi()
-{
-  WiFi.mode(WIFI_STA);
-  WiFi.hostname("GarageController");
-  WiFi.setAutoReconnect(true);
-
-  WiFi.begin(ssid, password);
-
-  while (WiFi.waitForConnectResult() != WL_CONNECTED)
-  {
-    delay(5000);
-    ESP.restart();
-  }
-}
-
 void SetupOTA()
 {
+  ArduinoOTA.setHostname(DEVICE_HOSTNAME);
   ArduinoOTA.onStart([]() {
-    String type;
-    if (ArduinoOTA.getCommand() == U_FLASH)
-    {
-      type = "sketch";
-    }
-    else
-    {
-      type = "filesystem";
-    }
+    Log.noticeln("OTA update starting");
   });
 
   ArduinoOTA.onEnd([]() {
-  });
-
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Log.noticeln("OTA update finished");
   });
 
   ArduinoOTA.onError([](ota_error_t error) {
+    Log.errorln("OTA update failed: %d", error);
   });
 
   ArduinoOTA.begin();
@@ -560,264 +734,4 @@ void SetupOTA()
 void SetupInterrupts()
 {
   os_timer_setfn(&doorToggleTimer, DoorToggleTimerCallback, NULL);
-}
-
-//#######################################################################
-//  WebServer Routines
-//#######################################################################
-String getContentType(String filename)
-{ // convert the file extension to the MIME type
-  if (filename.endsWith(".html"))
-    return "text/html";
-  else if (filename.endsWith(".css"))
-    return "text/css";
-  else if (filename.endsWith(".js"))
-    return "application/javascript";
-  else if (filename.endsWith(".ico"))
-    return "image/x-icon";
-  return "text/plain";
-}
-
-bool handleFileRead(String path, const std::map<String, String> &replacementWords)
-{ // send the right file to the client (if it exists)
-  if (path.endsWith("/"))
-    path += "index.html";                    // If a folder is requested, send the index file
-  String contentType = getContentType(path); // Get the MIME type
-  if (LittleFS.exists(path))
-  {                                       // If the file exists
-    File file = LittleFS.open(path, "r"); // Open it
-    String pageContents = file.readString();
-    for (auto item : replacementWords)
-    {
-      pageContents.replace("[" + item.first + "]", item.second);
-    }
-    server.send(200, getContentType(path), pageContents); // And send it to the client
-    file.close();                                         // Then close the file again
-    return true;
-  }
-  return false; // If the file doesn't exist, return false
-}
-
-bool handleFileRead(String path)
-{
-  return handleFileRead(path, std::map<String, String>());
-}
-
-void handleRoot()
-{
-  if (initialSetupComplete)
-  {
-    String path = "index.html";
-    std::map<String, String> m =
-        {
-            {"lastTemp", String(lastTemp)},
-            {"lastHumidity", String(lastHumidity)},
-            {"lastHeatIndex", String(lastHeatIndex)}};
-    handleFileRead(path, m);
-  }
-  else
-  {
-    server.sendHeader("Location", "wifiSetup", true);
-    server.send(302, "text/plain", "");
-  }
-}
-
-void handleWiFiSetup()
-{
-  String path = "wifiSetup.html";
-
-  std::map<String, String> m = {
-      {"ssid", WiFi.SSID()}};
-  handleFileRead(path, m);
-}
-
-void handleWiFiSetupComplete()
-{
-
-  String newssid = server.arg("ssid");
-  String newpassword = server.arg("password");
-
-  File file = LittleFS.open("creds.txt", "w+");
-  file.print(newssid);
-  file.print(',');
-  file.print(newpassword);
-  file.close();
-
-  String path = "wifiSetupComplete.html";
-  handleFileRead(path);
-  delay(5000);
-  ESP.restart();
-}
-
-void handleMQTTConfig()
-{
-  String path = "mqttConfig.html";
-
-  std::map<String, String> m = {
-      {"server", mqttServer},
-      {"port", String(mqttPort)},
-      {"username", mqttUser},
-      {"baseTopic", mqttBaseTopic}};
-
-  handleFileRead(path, m);
-}
-
-
-void writeConfigs()
-{
-  // Open the config file for writing
-  File configFile = LittleFS.open("/config.json", "w");
-  if (!configFile)
-  {
-    Serial.println("Failed to open config file for writing");
-    return;
-  }
-
-  // Create a JSON object to store the configurations
-  JsonDocument jsonDoc;
-
-  // Read the existing configurations from the file
-  if (configFile.size() > 0)
-  {
-    DeserializationError error = deserializeJson(jsonDoc, configFile);
-    if (error)
-    {
-      Serial.println("Failed to parse config file");
-      configFile.close();
-      return;
-    }
-  }
-
-  // Update or insert the configurations
-  jsonDoc["mqtt_host"] = mqttServer;
-  jsonDoc["mqtt_port"] = mqttPort;
-  jsonDoc["mqtt_username"] = mqttUser;
-  jsonDoc["mqtt_password"] = mqttPassword;
-  jsonDoc["mqtt_base_topic"] = mqttBaseTopic;
-  jsonDoc["wifi_ssid"] = ssid;
-  jsonDoc["wifi_password"] = password;
-
-  // Serialize the JSON object to the file
-  if (serializeJson(jsonDoc, configFile) == 0)
-  {
-    Serial.println("Failed to write to config file");
-  }
-
-  // Close the file
-  configFile.close();
-}
-
-
-void handleMQTTConfigComplete()
-{
-  mqttServer = server.arg("server").c_str();
-  mqttPort = server.arg("port").toInt();
-  mqttUser = server.arg("username").c_str();
-  mqttPassword = server.arg("password").c_str();
-  mqttBaseTopic = server.arg("baseTopic").c_str();
-
-  String baseTopicString = String(mqttBaseTopic);
-  if (!baseTopicString.isEmpty() && mqttBaseTopic[baseTopicString.length() - 1] != '/')
-  {
-    mqttBaseTopic = mqttBaseTopic + '/';
-  }
-
-  writeConfigs();
-
-  server.sendHeader("Location", "/", true);
-  server.send(302, "text/plain", "");
-}
-
-void handleDeviceConfig()
-{
-  String path = "deviceConfig.html";
-
-  std::map<String, String> m =
-      {
-          {"ping1WarnDist", String(ping1WarnDist)},
-          {"ping1StopDist", String(ping1StopDist)},
-          {"ping2WarnDist", String(ping2WarnDist)},
-          {"ping2StopDist", String(ping2StopDist)},
-          {"pingSpeedMS", String(pingSpeedMS)},
-          {"dhtReadTimeSeconds", String(dhtReadIntervalMillis / 1000)}};
-
-  handleFileRead(path, m);
-}
-
-void handleDeviceConfigComplete()
-{
-  ping1WarnDist = server.arg("ping1WarnDist").toInt();
-  ping1StopDist = server.arg("ping1StopDist").toInt();
-  ping2WarnDist = server.arg("ping2WarnDist").toInt();
-  ping2StopDist = server.arg("ping2StopDist").toInt();
-  pingSpeedMS = server.arg("pingSpeedMS").toInt();
-  dhtReadIntervalMillis = server.arg("dhtReadTimeSeconds").toInt() * 1000;
-
-  File file = LittleFS.open("pingConfig.txt", "w+");
-  file.print(ping1WarnDist);
-  file.print(',');
-  file.print(ping1StopDist);
-  file.print(',');
-  file.print(ping2WarnDist);
-  file.print(',');
-  file.print(ping2StopDist);
-  file.print(',');
-  file.print(pingSpeedMS);
-  file.print(',');
-
-  file.close();
-
-  file = LittleFS.open("dhtConfig.txt", "w+");
-  file.print(dhtReadIntervalMillis);
-  file.print(',');
-  file.close();
-
-  server.sendHeader("Location", "/", true);
-  server.send(302, "text/plain", "");
-}
-
-
-
-
-
-void readConfig()
-{
- // Read configs from SPIFFS
-  // If no configs, return
-  // If configs, set ssid, password, and stationMode
-  if (!LittleFS.begin()) {
-    Log.noticeln("Failed to mount file system");
-    return;
-  }
-  if (!LittleFS.exists("config.json")) {
-    Log.noticeln("No config file found");
-    return;
-  }
-  File configFile = LittleFS.open("config.json", "r");
-  if (!configFile) {
-    Log.noticeln("Failed to open config file");
-    return;
-  }
-  // Parse the JSON data
-  JsonDocument jsonDoc;
-  DeserializationError error = deserializeJson(jsonDoc, configFile);
-
-  if (error)
-  {
-    Log.noticeln("Failed to parse config file");
-    return;
-  }
-
-  // Read the values from the JSON document
-  ssid = jsonDoc["wifi_ssid"];
-  password = jsonDoc["wifi_password"];
-  mqttUser = jsonDoc["mqtt_username"];
-  mqttPassword = jsonDoc["mqtt_password"];
-  mqttServer = jsonDoc["mqtt_host"];
-  mqttBaseTopic = jsonDoc["mqtt_base_topic"];
-  mqttPort = jsonDoc["mqtt_port"].as<int>();
-
-  // Close the file
-  configFile.close();
-  Log.noticeln("Config file read");
 }

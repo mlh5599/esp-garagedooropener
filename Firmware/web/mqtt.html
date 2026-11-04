@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MQTT · Garage Door Opener</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+<header><a href="/" aria-label="Back">&lsaquo;</a><h1>MQTT &amp; Home Assistant</h1></header>
+<form method="post" action="/mqtt" class="card">
+<label for="mqttHost">Broker address</label>
+<input id="mqttHost" name="mqttHost" value="{{mqttHost}}" placeholder="192.168.1.10" autocapitalize="none" autocorrect="off">
+<span class="hint">Use an IP address or DNS name (.local names don't work). Leave blank to turn MQTT off.</span>
+<div class="row">
+<div><label for="mqttUser">Username</label><input id="mqttUser" name="mqttUser" value="{{mqttUser}}" autocapitalize="none" autocorrect="off"></div>
+<div><label for="mqttPassword">Password</label><input id="mqttPassword" name="mqttPassword" type="password" placeholder="{{mqttPasswordHint}}"></div>
+</div>
+<div class="row">
+<div><label for="mqttPort">Port</label><input id="mqttPort" name="mqttPort" type="number" min="1" max="65535" value="{{mqttPort}}"></div>
+<div><label for="baseTopic">Base topic</label><input id="baseTopic" name="baseTopic" value="{{baseTopic}}" autocapitalize="none"></div>
+</div>
+<label for="haPrefix">Home Assistant discovery prefix</label>
+<input id="haPrefix" name="haPrefix" value="{{haPrefix}}" autocapitalize="none">
+<span class="hint">Leave as "homeassistant" unless you changed it in Home Assistant's MQTT settings.</span>
+<button type="submit">Save</button>
+</form>
+</main>
+</body>
+</html>

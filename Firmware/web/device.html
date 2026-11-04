@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sensors · Garage Door Opener</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+<header><a href="/" aria-label="Back">&lsaquo;</a><h1>Sensors &amp; parking</h1></header>
+<form method="post" action="/device">
+<section class="card">
+<h2>Parking assist</h2>
+<p class="hint">Distances in cm, measured while the door is open. Set the interval to 0 to turn parking assist off and remove it from Home Assistant.</p>
+<label class="check"><input type="checkbox" id="live"> Live readings</label>
+<span class="hint">Reads both sensors several times a second, even with the door closed, to help you pick distances. Stops when you leave this page.</span>
+<dl class="stats live" id="liveStats" hidden>
+<dt>Bay 1</dt><dd id="bay1Cm">—</dd>
+<dt>Bay 2</dt><dd id="bay2Cm">—</dd>
+</dl>
+<div class="row">
+<div><label for="ping1WarnDist">Bay 1 warn</label><input id="ping1WarnDist" name="ping1WarnDist" type="number" min="0" max="1000" value="{{ping1WarnDist}}"></div>
+<div><label for="ping1StopDist">Bay 1 stop</label><input id="ping1StopDist" name="ping1StopDist" type="number" min="0" max="1000" value="{{ping1StopDist}}"></div>
+<div><label for="ping2WarnDist">Bay 2 warn</label><input id="ping2WarnDist" name="ping2WarnDist" type="number" min="0" max="1000" value="{{ping2WarnDist}}"></div>
+<div><label for="ping2StopDist">Bay 2 stop</label><input id="ping2StopDist" name="ping2StopDist" type="number" min="0" max="1000" value="{{ping2StopDist}}"></div>
+</div>
+<label for="pingSpeedMS">Measure every (ms)</label>
+<input id="pingSpeedMS" name="pingSpeedMS" type="number" min="0" max="60000" value="{{pingSpeedMS}}">
+</section>
+<section class="card">
+<h2>Temperature &amp; humidity</h2>
+<label for="dhtSeconds">Read every (seconds)</label>
+<input id="dhtSeconds" name="dhtSeconds" type="number" min="0" max="86400" value="{{dhtSeconds}}">
+<span class="hint">0 turns the sensor off.</span>
+</section>
+<button type="submit">Save</button>
+</form>
+</main>
+<script>
+(function () {
+  var live = document.getElementById('live'), box = document.getElementById('liveStats');
+  var timer, run = 0;
+  // 0 = no echo; ~357 cm is the sensor library's limit (nothing in range).
+  function cm(v) { return v == null ? '—' : v == 0 ? 'No echo' : v >= 355 ? 'Nothing in range' : v + ' cm'; }
+  function poll(id) {
+    fetch('/parking.json?live=1', {cache: 'no-store'}).then(function (r) { return r.json(); }).then(function (s) {
+      if (id !== run) return;
+      document.getElementById('bay1Cm').textContent = cm(s.bay1Cm);
+      document.getElementById('bay2Cm').textContent = cm(s.bay2Cm);
+    }).catch(function () {}).then(function () {
+      if (id === run && live.checked) timer = setTimeout(function () { poll(id); }, 400);
+    });
+  }
+  live.onchange = function () {
+    clearTimeout(timer);
+    run++;
+    box.hidden = !live.checked;
+    if (live.checked) poll(run);
+  };
+})();
+</script>
+</body>
+</html>

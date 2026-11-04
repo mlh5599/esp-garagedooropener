@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wi-Fi · Garage Door Opener</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+<header><a href="/" aria-label="Back">&lsaquo;</a><h1>Wi-Fi</h1></header>
+<form method="post" action="/wifi" class="card">
+<label for="ssid">Network name</label>
+<input id="ssid" name="ssid" value="{{ssid}}" required autocapitalize="none" autocorrect="off">
+<label for="password">Password</label>
+<input id="password" name="password" type="password" minlength="8" placeholder="{{wifiPasswordHint}}">
+<span class="hint">Saving restarts the opener. If it can't join the network, it starts the {{hotspot}} hotspot so you can fix the settings.</span>
+<button type="submit">Save and restart</button>
+</form>
+</main>
+</body>
+</html>

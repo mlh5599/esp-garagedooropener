@@ -4,6 +4,14 @@
     "mqtt_username": "",
     "mqtt_password": "",
     "mqtt_base_topic": "my/base/topic/",
+    "ha_discovery_prefix": "homeassistant",
     "wifi_ssid": "NetworkSSID",
-    "wifi_password": "*******"
+    "wifi_password": "*******",
+    "wifi_verified": false,
+    "ping1_warn_dist": 60,
+    "ping1_stop_dist": 30,
+    "ping2_warn_dist": 60,
+    "ping2_stop_dist": 30,
+    "ping_speed_ms": 500,
+    "dht_read_interval_seconds": 60
 }

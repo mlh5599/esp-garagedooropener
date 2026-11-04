@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Garage Door Opener Setup</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+<header><h1>Set up your opener</h1></header>
+<form method="post" action="/save">
+<section class="card">
+<h2>Wi-Fi</h2>
+<p>Choose the network this opener should join.</p>
+<div class="nets">{{networks}}</div>
+<a class="hint" href="/?scan=1">Scan again</a>
+<label for="ssid">Network name</label>
+<input id="ssid" name="ssid" value="{{ssid}}" required autocapitalize="none" autocorrect="off">
+<label for="password">Password</label>
+<input id="password" name="password" type="password" minlength="8" placeholder="{{wifiPasswordHint}}">
+<label class="check"><input type="checkbox" id="show"> Show password</label>
+</section>
+<section class="card">
+<h2>MQTT &amp; Home Assistant</h2>
+<p>Optional. Leave the broker blank to set this up later.</p>
+<label for="mqttHost">Broker address</label>
+<input id="mqttHost" name="mqttHost" value="{{mqttHost}}" placeholder="192.168.1.10" autocapitalize="none" autocorrect="off">
+<span class="hint">Use an IP address or DNS name (.local names don't work).</span>
+<div class="row">
+<div><label for="mqttUser">Username</label><input id="mqttUser" name="mqttUser" value="{{mqttUser}}" autocapitalize="none" autocorrect="off"></div>
+<div><label for="mqttPassword">Password</label><input id="mqttPassword" name="mqttPassword" type="password" placeholder="{{mqttPasswordHint}}"></div>
+</div>
+<details>
+<summary>Advanced</summary>
+<div class="row">
+<div><label for="mqttPort">Port</label><input id="mqttPort" name="mqttPort" type="number" min="1" max="65535" value="{{mqttPort}}"></div>
+<div><label for="baseTopic">Base topic</label><input id="baseTopic" name="baseTopic" value="{{baseTopic}}" autocapitalize="none"></div>
+</div>
+<label for="haPrefix">Home Assistant discovery prefix</label>
+<input id="haPrefix" name="haPrefix" value="{{haPrefix}}" autocapitalize="none">
+</details>
+</section>
+<button type="submit">Save and connect</button>
+</form>
+<p class="hint">Setup hotspot: {{hotspot}}</p>
+</main>
+<script>
+document.querySelectorAll('.net').forEach(function(b){b.onclick=function(){ssid.value=b.dataset.ssid;password.focus()}});
+show.onchange=function(){password.type=show.checked?'text':'password'};
+</script>
+</body>
+</html>

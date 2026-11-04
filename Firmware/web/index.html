@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<noscript><meta http-equiv="refresh" content="10"></noscript>
+<title>Garage Door Opener</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+<header><h1>Garage Door</h1><span id="mqtt" class="pill {{mqttClass}}">{{mqtt}}</span></header>
+<section class="card hero">
+<h2>Door</h2>
+<strong id="door" class="{{doorClass}}">{{door}}</strong>
+</section>
+<section class="card">
+<h2>Sensors</h2>
+<dl class="stats">
+<dt>Motion</dt><dd id="motion">{{motion}}</dd>
+<dt>Temperature</dt><dd id="temperature">{{temperature}}</dd>
+<dt>Humidity</dt><dd id="humidity">{{humidity}}</dd>
+<dt>Heat index</dt><dd id="heatIndex">{{heatIndex}}</dd>
+<dt>Bay 1 parking</dt><dd id="bay1">{{bay1}}</dd>
+<dt>Bay 2 parking</dt><dd id="bay2">{{bay2}}</dd>
+</dl>
+</section>
+<section class="card links">
+<h2>Settings</h2>
+<a href="/wifi">Wi-Fi</a>
+<a href="/mqtt">MQTT &amp; Home Assistant</a>
+<a href="/device">Sensors &amp; parking</a>
+</section>
+<section class="card">
+<h2>Device</h2>
+<dl class="stats">
+<dt>Network</dt><dd>{{network}}</dd>
+<dt>IP address</dt><dd>{{ip}}</dd>
+<dt>Signal</dt><dd id="signal">{{signal}}</dd>
+<dt>Uptime</dt><dd id="uptime">{{uptime}}</dd>
+<dt>Free memory</dt><dd id="heap">{{heap}}</dd>
+<dt>Firmware</dt><dd>{{version}}</dd>
+</dl>
+<form method="post" action="/restart"><button class="ghost">Restart</button></form>
+<form method="post" action="/reset" onsubmit="return confirm('Erase all settings and restart into setup mode?')"><button class="danger">Factory reset</button></form>
+</section>
+</main>
+<script>
+// Refresh the live values in place every few seconds.
+function refresh() {
+  fetch('/status.json', {cache: 'no-store'}).then(function (r) { return r.json(); }).then(function (s) {
+    for (var k in s) { var el = document.getElementById(k); if (el) el.textContent = s[k]; }
+    document.getElementById('door').className = s.doorClass;
+    document.getElementById('mqtt').className = 'pill ' + s.mqttClass;
+  }).catch(function () {}).then(function () { setTimeout(refresh, 5000); });
+}
+setTimeout(refresh, 5000);
+</script>
+</body>
+</html>
